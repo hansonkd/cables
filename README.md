@@ -1,6 +1,6 @@
 # Cables
 
-Cables is an asynchronous multiplexed HTTP/2 Client. Streams are consumed by
+Cables is an asynchronous multiplexed HTTP/2 Client for Elixir. Streams are consumed by
 modules implementing `Cables.Handler` which build a state by looping over chunks
 of data returned by the request.
 
@@ -45,7 +45,7 @@ After all response data is recieved, `handle_finish/1` will be called with the s
 
 This example shows how to use the streaming capabilities to incrementally Proxy a request from `Plug.Conn` to a remote HTTP connection.
 
-```
+```Elixir
 defmodule PlugProxy do
   use Cables.Handler
 
@@ -91,7 +91,7 @@ end
 
 Connection configurations are backed by profiles the default profile is:
 
-```
+```Elixir
 [
   # How long to wait in milliseconds for a connection from the pool
   pool_timeout: 5_000,
@@ -113,7 +113,7 @@ Connection configurations are backed by profiles the default profile is:
 
 You can override the default profile or create a new one by creating an entry in your `config/*.exs` file
 
-```
+```Elixir
 config :cables,
   profiles: [
     default: [
@@ -129,7 +129,7 @@ config :cables,
 Cables will work with the previous version of HTTP, however you should specify a
 profile with `max_streams` set to 1 to prevent multiplexing.
 
-```
+```Elixir
 config :cables,
   profiles: [
     http: [
