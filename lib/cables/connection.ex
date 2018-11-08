@@ -14,26 +14,25 @@ defmodule Cables.Connection do
   end
 
   def init([host, port, conn_opts, max_streams, ttl]) do
-    IO.inspect(%Connection{host: host, port: port, conn_opts: conn_opts, max_streams: max_streams, ttl: ttl, streams: MapSet.new})
     {:ok, %Connection{host: host, port: port, conn_opts: conn_opts, max_streams: max_streams, ttl: ttl, streams: MapSet.new}}
   end
-  def handle_call({:request, request}, from, state = %Connection{streams: streams, max_streams: max_streams}) do
+  def handle_call({:request, request}, _from, state = %Connection{max_streams: max_streams}) do
     {reply, new_state} = connect_or_request(request, state)
     {:reply, {reply, MapSet.size(state.streams) < max_streams} , new_state}
   end
-  def handle_cast({:finish_stream, stream_ref}, state = %Connection{max_streams: max_streams, streams: streams}) do
+  def handle_cast({:finish_stream, stream_ref}, state = %Connection{streams: streams}) do
     new_streams = MapSet.delete(streams, stream_ref)
     new_state = %{state | streams: new_streams}
     {:noreply, new_state}
   end
-  def handle_info({:gun_up, gun_pid, protocol}, state) do
+  def handle_info({:gun_up, _gun_pid, _protocol}, state) do
     {:noreply, state}
   end
   def handle_info(:close, state = %Connection{gun_pid: pid}) do
     :gun.close(pid)
     {:noreply, state}
   end
-  def handle_info({:gun_down, gun_pid, _protocol, reason, _killed_streams, unprocessed_streams}, state = %Connection{ttl: ttl, gun_pid: pid}) do
+  def handle_info({:gun_down, gun_pid, _protocol, _reason, _killed_streams, _unprocessed_streams}, state = %Connection{gun_pid: gun_pid}) do
     {:noreply, %{state | streams: MapSet.new}}
   end
   def handle_info(
