@@ -10,6 +10,7 @@ defmodule Cables.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       docs: docs(),
+      description: description(),
       package: package(),
       name: "Cables",
       source_url: "https://github.com/hansonkd/cables"
@@ -40,11 +41,15 @@ defmodule Cables.MixProject do
     ]
   end
 
+  defp description() do
+    "An asynchronous multiplexed HTTP/2 Client for Elixir."
+  end
+
   defp package() do
     [
       # These are the default files included in the package
-      files: ~w(lib priv .formatter.exs mix.exs README* readme* LICENSE*
-                license* CHANGELOG* changelog* src),
+      maintainers: ["Kyle Hanson"],
+      files: ~w(lib .formatter.exs mix.exs README* LICENSE*),
       licenses: ["MIT"],
       links: %{"GitHub" => "https://github.com/hansonkd/cables"}
     ]
