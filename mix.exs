@@ -4,7 +4,7 @@ defmodule Cables.MixProject do
   def project do
     [
       app: :cables,
-      version: "0.1.0",
+      version: "0.1.1",
       elixir: "~> 1.7",
       build_embedded: Mix.env == :prod,
       start_permanent: Mix.env() == :prod,
@@ -28,7 +28,6 @@ defmodule Cables.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:poolboy, "~> 1.5.1"},
       {:gun, "~> 1.3"},
       {:ex_doc, "~> 0.19", only: :dev, runtime: false}
     ]

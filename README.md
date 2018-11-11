@@ -20,13 +20,12 @@ for the response to be recieved before sending another request.
 ### Multiple Connections
 
 Even though multiple requests can be piped through a single connection, sometimes
-opening more connections will increase performance substantially because each connection
-can be load-balanced to a different server. Cables will automatically open new connections as needed.
+opening more connections will substantially increase performance. Cables will automatically open new connections as load is detected.
 
 ### Persistent Connections
 
 Cables will open a persistent connection using [gun](https://github.com/ninenines/gun).
-Gun will attempt to keep the connection open and reopen if it goes down. Sometimes this is not always wanted. Cables will close connections after the TTL (specified in the profile option `conn_ttl`) passes.
+Gun will attempt to keep the connection open and reopen if it goes down. Sometimes this is not always wanted. Cables will close connections after the TTL (specified in the profile option `connection_ttl`) passes.
 
 ### Handlers
 
@@ -80,7 +79,7 @@ defmodule PlugProxy do
   end
 end
 
-{:ok, cable} = Cables.ensure_connection("https://httpbin.org/")
+{:ok, cable} = Cables.new_pool("https://nghttp2.org/")
 # ... Somewhere in your Plug
 {:ok, conn} = Cables.request(
   cable, conn.method, conn.path, conn.headers, PlugProxy, {conn, [length: 1024, read_length: 1024]}
@@ -95,19 +94,22 @@ Connection configurations are backed by profiles the default profile is:
 [
   # How long to wait in milliseconds for a connection from the pool
   pool_timeout: 5_000,
-  # How long to wait in milliseconds for a response before closing a connection.
+  # How long to wait in milliseconds for a response.
   conn_timeout: 5_000,
-  # Number of streams per connection.
+  # When all connections have this many streams, open a new connection.
+  threshold: 10,
+  # How many requests to serve on a connection before closing
+  max_requests: :infinity,
+  # Maximum number of streams per connection
   max_streams: 100,
-  # Number of connections that should stay open.
-  pool_size: 10,
-  # Number of extra connections to create if pool is empty. When these connections are returned
-  # they will be closed without waiting for the TTL if the pool is full.
-  max_overflow: 0,
+  # Maximum number of connections
+  max_connections: 10,
+  # Minimum number of connections to hold open
+  min_connections: 1,
   # Time in milliseconds that should pass without a request before the connection is closed
-  conn_ttl: 10_000,
+  connection_ttl: 10_000,
   # Extra connection options to pass to `:gun.open/3`
-  conn_opts: %{}
+  connection_opts: %{}
 ]
 ```
 
@@ -120,9 +122,15 @@ config :cables,
       max_streams: 1000
     ],
     slow_connection: [
-      conn_timeout: 10_000
+      connection_timeout: 10_000
     ]
   ]
+```
+
+Then pass the profile into `Cables.new_pool/2`
+
+```elixir
+{:ok, slow_pool} = Cables.new_pool("https://myslowsite", :slow_connection)
 ```
 
 ### HTTP Fallback
@@ -137,7 +145,9 @@ config :cables,
     ]
   ]
 
-{:ok, http_cable} = Cables.ensure_connection("https://httpbin.com/", :http)
+...
+
+{:ok, http_cable} = Cables.new_pool("https://httpbin.com/", :http)
 ```
 
 
@@ -148,7 +158,7 @@ The package can be installed by adding `cables` to your list of dependencies in 
 ```elixir
 def deps do
   [
-    {:cables, "~> 0.1.0"}
+    {:cables, "~> 0.1.1"}
   ]
 end
 ```

@@ -2,22 +2,24 @@ defmodule Cables do
   @moduledoc """
   Asynchronous multiplexed HTTP/2 connection manager.
 
-  Create a new Cable using `Cable.ensure_connection/2`. Cables will not open a connection
+  Create a new Cable using `Cable.new_pool/2`. Cables will not open a connection
   until the first request is recieved.
 
   ## Examples
-      {:ok, cable} = Cables.ensure_connection("https://httpbin.org/")
-      {:ok, %Cables.Response{status: 200}} = Cables.get(cable, "/get")
+      {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      {:ok, %Cables.Response{status: 200}} = Cables.get(cable, "/httpbin/get")
   """
 
   @type profile() :: [
     pool_timeout: integer(),
-    conn_timeout: integer(),
+    connection_timeout: integer(),
+    threshold: integer(),
+    max_requests: integer(),
     max_streams: integer(),
-    pool_size: integer(),
-    max_overflow: integer(),
-    conn_ttl: integer(),
-    conn_opts: map()
+    max_connections: integer(),
+    min_connections: integer(),
+    connnection_ttl: integer(),
+    connection_opts: map()
   ]
   @type http_method() :: :get | :post | :head | :put | :patch | :options | :delete | String.t
 
@@ -32,31 +34,24 @@ defmodule Cables do
     @moduledoc """
     Holds timeout info and poolname
     """
-    defstruct [:pool_name, :pool_timeout, :conn_timeout]
+    defstruct [:pool_name, :pool_timeout, :connection_timeout]
   end
 
   @doc """
   If a pool is not already created for the specified uri, create one.
   """
-  @spec ensure_connection(String.t(), atom()) :: Cabel.t()
-  def ensure_connection(uri, profile_name \\ :default) do
+  @spec new_pool(String.t(), atom()) :: Cabel.t()
+  def new_pool(uri, profile_name \\ :default) do
     %URI{host: host, scheme: scheme, port: port} = URI.parse(uri)
-    pool_name = String.to_atom("#{profile_name}@#{uri}")
 
     profile = get_profile(profile_name)
-    config = poolboy_config(pool_name, profile)
     conn_opts = conn_opts(scheme, profile)
 
-    supervisor_result = DynamicSupervisor.start_child(
+    {:ok, pid} = supervisor_result = DynamicSupervisor.start_child(
       Cabels.ConnPoolSupervisor,
-      :poolboy.child_spec(pool_name, config, [to_charlist(host), port, conn_opts, Keyword.get(profile, :max_streams), Keyword.get(profile, :conn_ttl)])
+      {Cables.Pool, Keyword.merge(profile, [connection_opts: conn_opts, host: to_charlist(host), port: port])}
     )
-    case supervisor_result do
-      {:ok, _pid} ->
-        {:ok, make_cable(pool_name, profile)}
-      {:error, {:already_started, _pid}} ->
-        {:ok, make_cable(pool_name, profile)}
-    end
+    {:ok, make_cable(pid, profile)}
   end
 
   @doc """
@@ -67,13 +62,13 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.ensure_connection("https://httpbin.org/")
-      ...> {:ok, %Cables.Response{status: status}} = Cables.request(cable, :get, "/get", Cables.Response, nil)
+      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      ...> {:ok, %Cables.Response{status: status}} = Cables.request(cable, :get, "/httpbin/get", Cables.Response, nil)
       ...> status
       200
   """
   @spec request(Cabel.t(), http_method(), String.t, [{String.t, String.t}], String.t, pid(), module(), any()) :: t::any()
-  def request(%Cable{pool_name: pool_name, pool_timeout: pool_timeout, conn_timeout: timeout}, method, path, headers \\ [], body \\ "", reply_to \\ nil, module, init_args) do
+  def request(%Cable{pool_name: pool, pool_timeout: pool_timeout, connection_timeout: timeout}, method, path, headers \\ [], body \\ "", reply_to \\ nil, module, init_args) do
     method_str =
       case method do
         :get -> "GET"
@@ -86,7 +81,7 @@ defmodule Cables do
         m when is_binary(m) -> m
       end
 
-    req = %Request{
+    request = %Request{
       method: method_str,
       path: path,
       headers: headers,
@@ -94,31 +89,13 @@ defmodule Cables do
       reply_to: if is_nil(reply_to) do self() else reply_to end
     }
 
-    c = :poolboy.checkout(pool_name, true, pool_timeout)
-    {{remote_conn, stream_ref}, check_in} =
-      try do
-        GenServer.call(c, {:request, req})
-      rescue
-        exception ->
-          :ok = :poolboy.checkin(pool_name, c)
-          reraise exception, __STACKTRACE__
-      else
-        {ret, streams_available} ->
-          # If there are available streams, immedidately return to the pool. Else return
-          # to the pool after this stream is finished.
-          if streams_available do
-            :ok = :poolboy.checkin(pool_name, c)
-          end
-          {ret, not streams_available}
-      end
+    {gun_pid, stream_ref} = Cables.Pool.request_stream(pool, request, pool_timeout)
+
 
     try do
-      module.handle(remote_conn, stream_ref, timeout, init_args)
+      module.handle(gun_pid, stream_ref, timeout, init_args)
     after
-      if check_in do
-        :ok = :poolboy.checkin(pool_name, c)
-      end
-      GenServer.cast(c, {:finish_stream, stream_ref})
+      Cables.Pool.finish_stream(pool, gun_pid, stream_ref)
     end
   end
 
@@ -127,8 +104,8 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.ensure_connection("https://httpbin.org/")
-      ...> {:ok, %Cables.Response{status: status}} = Cables.get(cable, "/get")
+      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      ...> {:ok, %Cables.Response{status: status}} = Cables.get(cable, "/httpbin/get")
       ...> status
       200
 
@@ -143,8 +120,8 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.ensure_connection("https://httpbin.org/")
-      ...> {:ok, %Cables.Response{status: status}} = Cables.post(cable, "/post", [], "hello world")
+      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      ...> {:ok, %Cables.Response{status: status}} = Cables.post(cable, "/httpbin/post", [], "hello world")
       ...> status
       200
 
@@ -159,8 +136,8 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.ensure_connection("https://httpbin.org/")
-      ...> {:ok, %Cables.Response{status: status}} = Cables.put(cable, "/put", [], "hello world")
+      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      ...> {:ok, %Cables.Response{status: status}} = Cables.put(cable, "/httpbin/put", [], "hello world")
       ...> status
       200
   """
@@ -174,8 +151,8 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.ensure_connection("https://httpbin.org/")
-      ...> {:ok, %Cables.Response{status: status}} = Cables.patch(cable, "/patch", [], "hello world")
+      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      ...> {:ok, %Cables.Response{status: status}} = Cables.patch(cable, "/httpbin/patch", [], "hello world")
       ...> status
       200
   """
@@ -189,8 +166,8 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.ensure_connection("https://httpbin.org/")
-      ...> {:ok, %Cables.Response{status: status}} = Cables.delete(cable, "/delete")
+      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      ...> {:ok, %Cables.Response{status: status}} = Cables.delete(cable, "/httpbin/delete")
       ...> status
       200
   """
@@ -249,7 +226,7 @@ defmodule Cables do
         "https" -> :tls
         _ -> :tcp
       end
-    Map.merge(%{transport: transport}, Keyword.get(profile, :conn_opts))
+    Map.merge(%{transport: transport}, Keyword.get(profile, :connection_opts))
   end
 
   @spec make_cable(atom(), profile()) :: Cable.t()
@@ -257,7 +234,7 @@ defmodule Cables do
     %Cable{
       pool_name: pool_name,
       pool_timeout: Keyword.get(profile, :pool_timeout),
-      conn_timeout: Keyword.get(profile, :conn_timeout),
+      connection_timeout: Keyword.get(profile, :connection_timeout),
     }
   end
 
@@ -265,14 +242,21 @@ defmodule Cables do
   defp get_profile(profile_name) do
     default = [
       pool_timeout: 5_000,
-      conn_timeout: 5_000,
+      connection_timeout: 5_000,
+      threshold: 10,
+      max_requests: :infinity,
       max_streams: 100,
-      pool_size: 10,
-      max_overflow: 0,
-      conn_ttl: 10_000,
-      conn_opts: %{}
+      max_connections: 10,
+      min_connections: 1,
+      connection_ttl: 10_000,
+      connection_opts: %{}
     ]
     profiles = Application.get_env(:cables, :profiles, [])
-    Keyword.merge(default, Keyword.get(profiles, profile_name, []))
+    profile = Keyword.merge(default, Keyword.get(profiles, profile_name, []))
+    threshold = min(Keyword.fetch!(profile, :threshold), Keyword.fetch!(profile, :max_streams))
+    min_connections = min(Keyword.fetch!(profile, :min_connections), Keyword.fetch!(profile, :max_connections))
+    profile
+    |> Keyword.put(:threshold, threshold)
+    |> Keyword.put(:min_connections, min_connections)
   end
 end
