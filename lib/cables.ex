@@ -47,7 +47,7 @@ defmodule Cables do
     profile = get_profile(profile_name)
     conn_opts = conn_opts(scheme, profile)
 
-    {:ok, pid} = supervisor_result = DynamicSupervisor.start_child(
+    {:ok, pid} = DynamicSupervisor.start_child(
       Cabels.ConnPoolSupervisor,
       {Cables.Pool, Keyword.merge(profile, [connection_opts: conn_opts, host: to_charlist(host), port: port])}
     )
@@ -208,17 +208,6 @@ defmodule Cables do
     :gun.data(gun_pid, stream_ref, :fin, data)
   end
 
-  @spec conn_opts(String.t(), profile()) :: any()
-  defp poolboy_config(pool_name, profile) do
-    [
-      name: {:local, pool_name},
-      worker_module: Cables.Connection,
-      size: Keyword.get(profile, :pool_size),
-      max_overflow: Keyword.get(profile, :max_overflow),
-      strategy: :lifo
-    ]
-  end
-
   @spec conn_opts(String.t(), profile()) :: map()
   defp conn_opts(scheme, profile) do
     transport =
@@ -240,7 +229,7 @@ defmodule Cables do
 
   @spec get_profile(atom()) :: profile()
   defp get_profile(profile_name) do
-    default = [
+    defaults = [
       pool_timeout: 5_000,
       connection_timeout: 5_000,
       threshold: 10,
@@ -252,7 +241,11 @@ defmodule Cables do
       connection_opts: %{}
     ]
     profiles = Application.get_env(:cables, :profiles, [])
-    profile = Keyword.merge(default, Keyword.fetch!(profiles, profile_name))
+    profile = case profile_name do
+      :default -> Keyword.get(profiles, profile_name, [])
+      _ -> Keyword.fetch!(profiles, profile_name)
+    end
+    profile = Keyword.merge(defaults, profile)
     threshold = min(Keyword.fetch!(profile, :threshold), Keyword.fetch!(profile, :max_streams))
     min_connections = min(Keyword.fetch!(profile, :min_connections), Keyword.fetch!(profile, :max_connections))
     profile

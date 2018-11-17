@@ -66,14 +66,13 @@ defmodule Cables.Pool do
         from,
         pool = %Pool{
             connections: connections,
-            waiting: waiting,
-            max_requests: max_requests
+            waiting: waiting
             }) do
         case find_or_start_connection(Enum.count(requests), pool) do
             {nil, new_pool} ->
                 {:noreply, %{new_pool | waiting: :queue.in({from, requests}, waiting)}}
             {{gun_pid, conn}, new_pool} ->
-                {stream_refs, new_conn} = do_requests(requests, gun_pid, conn, max_requests)
+                {stream_refs, new_conn} = do_requests(requests, gun_pid, conn)
                 {:reply, {gun_pid, stream_refs}, %{new_pool | connections: Map.put(connections, gun_pid, new_conn)}}
         end
     end
@@ -92,7 +91,7 @@ defmodule Cables.Pool do
                 %{^gun_pid => conn = %Connection{streams: streams}} ->
                     new_streams = Enum.reduce(stream_refs, streams, fn stream_ref, streams -> MapSet.delete(streams, stream_ref) end)
                     {new_connection, new_waiting} =
-                        handle_waiting(gun_pid, %{conn | streams: new_streams}, waiting, max_streams, max_requests)
+                        handle_waiting(gun_pid, %{conn | streams: new_streams}, waiting, max_streams)
                     num_streams = MapSet.size(new_connection.streams)
                     new_connections =
                         cond do
@@ -100,7 +99,7 @@ defmodule Cables.Pool do
                                 timer = Process.send_after(self(), {:close, gun_pid}, ttl)
                                 Map.put(connections, gun_pid, %{new_connection | timer: timer})
                             num_streams == 0 and new_connection.lifetime >= max_requests ->
-                                Process.send(self(), {:close, gun_pid})
+                                send(self(), {:close, gun_pid})
                                 Map.delete(connections, gun_pid)
                             true ->
                                 Map.put(connections, gun_pid, new_connection)
@@ -120,18 +119,17 @@ defmodule Cables.Pool do
             pending: pending,
             connections: connections,
             waiting: waiting,
-            max_streams: max_streams,
-            max_requests: max_requests}) do
+            max_streams: max_streams}) do
         {ref, new_pending} = Map.pop(pending, gun_pid)
         connection = Map.get_lazy(connections, gun_pid, fn -> Connection.new(ref) end)
-        {new_connection, new_waiting} = handle_waiting(gun_pid, connection, waiting, max_streams, max_requests)
+        {new_connection, new_waiting} = handle_waiting(gun_pid, connection, waiting, max_streams)
         {:noreply, %{pool | pending: new_pending, waiting: new_waiting, connections: Map.put(connections, gun_pid, new_connection)}}
     end
-    def handle_info({:gun_down, gun_pid, protocol, reason, killed_streams, unprocessed_streams}, pool = %Pool{pending: pending, connections: connections}) do
+    def handle_info({:gun_down, gun_pid, _protocol, _reason, _killed_streams, _unprocessed_streams}, pool = %Pool{connections: connections}) do
         {:noreply, %{pool | connections: Map.delete(connections, gun_pid)}}
     end
     def handle_info(
-        {:DOWN, _gun_ref, :process, gun_pid, reason},
+        {:DOWN, _gun_ref, :process, gun_pid, _reason},
         pool = %Pool{
             pending: pending,
             connections: connections}) do
@@ -190,26 +188,26 @@ defmodule Cables.Pool do
     defp count_accepting(%Pool{connections: connections, max_requests: max_requests}) do
         Enum.count(connections, fn {_, %Connection{lifetime: lifetime}} -> lifetime < max_requests end)
     end
-    defp handle_waiting(gun_pid, conn = %Connection{streams: streams}, waiting_queue, max_streams, max_requests) do
+    defp handle_waiting(gun_pid, conn = %Connection{streams: streams}, waiting_queue, max_streams) do
         available_streams = max_streams - MapSet.size(streams)
         if available_streams > 0 do
             case :queue.out(waiting_queue) do
                 {{:value, {waiting, requests}}, new_queue} ->
                     if Enum.count(requests) <= available_streams do
-                        {stream_refs, new_conn} = do_requests(requests, gun_pid, conn, max_requests)
+                        {stream_refs, new_conn} = do_requests(requests, gun_pid, conn)
                         GenServer.reply(waiting, {gun_pid, stream_refs})
-                        handle_waiting(gun_pid, new_conn, new_queue, max_streams, max_requests)
+                        handle_waiting(gun_pid, new_conn, new_queue, max_streams)
                     else
                         {conn, waiting_queue}
                     end
-                {:empty, q} ->
+                {:empty, _q} ->
                     {conn, waiting_queue}
             end
         else
             {conn, waiting_queue}
         end
     end
-    defp do_requests(requests, gun_pid, conn = %Connection{timer: timer, streams: streams, lifetime: lifetime}, max_requests) do
+    defp do_requests(requests, gun_pid, conn = %Connection{timer: timer, streams: streams, lifetime: lifetime}) do
         if timer != nil do
             Process.cancel_timer(timer)
         end
