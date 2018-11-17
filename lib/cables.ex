@@ -252,7 +252,7 @@ defmodule Cables do
       connection_opts: %{}
     ]
     profiles = Application.get_env(:cables, :profiles, [])
-    profile = Keyword.merge(default, Keyword.get(profiles, profile_name, []))
+    profile = Keyword.merge(default, Keyword.fetch!(profiles, profile_name))
     threshold = min(Keyword.fetch!(profile, :threshold), Keyword.fetch!(profile, :max_streams))
     min_connections = min(Keyword.fetch!(profile, :min_connections), Keyword.fetch!(profile, :max_connections))
     profile
