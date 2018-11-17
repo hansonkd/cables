@@ -1,6 +1,6 @@
 # Cables
 
-An asynchronous multiplexed HTTP/2 Client for Elixir. Streams are consumed by
+An experimental asynchronous multiplexed HTTP/2 Client for Elixir. Streams are consumed by
 modules implementing `Cables.Handler` which build a state by looping over chunks
 of data returned by the request.
 
@@ -150,6 +150,21 @@ config :cables,
 {:ok, http_cable} = Cables.new_pool("https://httpbin.com/", :http)
 ```
 
+## Benchmarks
+
+Cables client wasn't built out of a need for speed, but rather it was made from necessity to base new applications around low-level parallel long-lived HTTP/2 streams with few connections. That being said, the client that resulted has very good performance characteristics.
+
+Since any new HTTP client would be incomplete without a comparison. A hastely put together benchmark can be found at [CablesBenchmark](http://github.com/hansonkd/cables_benchmark). The basic conclusion is that Cables can be up to 10-30% faster than HTTPoison/hackney (HTTP/1.1)'s connection pools while maintaining a fraction of the connections. Even when Cables are limited to 1 stream per connection, they will in general outperform HTTPoison. When pushing 10,000 requests down 1 connection with 1 stream, Cables are about 2x faster than HTTPoison.
+
+The benchmark is very naive and is done with the client on the same machine as the server. Over a network, I would expect HTTP/2 performance to continue to outpace HTTP/1.1, but that is an exercise for another day.
+
+*Notes: Hackney actually verifies the SSL certs and is in general a more robust HTTP client. If you need to use something in production, use HTTPosion or Hackney*
+
+## Work that needs to be done
+
+The pool is very naive. It is based around searching over a Map structure and in Elixir Maps have no defined order which complicates how the requests are distributed among the connections.
+
+When there is a spurt of new requests (requests added faster than the time it takes to connect) when the current connections are past their threshold (or there are not current connections), Cables will open all available connections. This isn't ideal if you add 10 requests to the queue at once because it will open 10 new connections in anticipation of more requests later. We should add the option to limit the rate of new connections created.
 
 ## Installation
 
