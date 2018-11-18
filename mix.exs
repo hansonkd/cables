@@ -43,8 +43,6 @@ defmodule Cables.MixProject do
   defp description() do
     """
     An experimental asynchronous multiplexed HTTP/2 Client for Elixir. Streams are consumed by modules implementing `Cables.Handler` which build a state by looping over chunks of data returned by the request.
-
-    You can either implement the handler yourself or use the convience methods `Cables.get/4`, `Cables.post/5`, `Cables.patch/5`, `Cables.put/5`, `Cables.delete/5` and `Cables.head/4`
     """
   end
 
