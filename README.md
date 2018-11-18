@@ -85,10 +85,11 @@ end
   cable, conn.method, conn.path, conn.headers, PlugProxy, {conn, [length: 1024, read_length: 1024]}
 )
 ```
+
 ### Request Options
 You can customize the connection and pool timeouts by passing options to the request
 
-```
+```elixir
 {:ok, %Cables.Response{status: status}} = Cables.get(cable, "/httpbin/delay/8", [], connection_timeout: 10_000, pool_timeout: 10_000)
 ```
 
@@ -158,7 +159,7 @@ config :cables,
 
 You can add a Cables pool to your supervisor tree using `Cables.child_spec/3`
 
-```
+```elixir
 children = [
   Cables.child_spec(:my_named_pool, "https://nghttp2.org/")
 ]
