@@ -79,23 +79,25 @@ defmodule PlugProxy do
   end
 end
 
-{:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+{:ok, cable} = Cables.new("https://nghttp2.org/")
 # ... Somewhere in your Plug
 {:ok, conn} = Cables.request(
   cable, conn.method, conn.path, conn.headers, PlugProxy, {conn, [length: 1024, read_length: 1024]}
 )
 ```
+### Request Options
+You can customize the connection and pool timeouts by passing options to the request
+
+```
+{:ok, %Cables.Response{status: status}} = Cables.get(cable, "/httpbin/delay/8", [], connection_timeout: 10_000, pool_timeout: 10_000)
+```
 
 ### Profiles
 
-Connection configurations are backed by profiles the default profile is:
+Connection configurations are backed by profiles. The default profile is:
 
 ```elixir
 [
-  # How long to wait in milliseconds for a connection from the pool
-  pool_timeout: 5_000,
-  # How long to wait in milliseconds for a response.
-  conn_timeout: 5_000,
   # When all connections have this many streams, open a new connection.
   threshold: 10,
   # How many requests to serve on a connection before closing
@@ -107,11 +109,13 @@ Connection configurations are backed by profiles the default profile is:
   # Minimum number of connections to hold open
   min_connections: 1,
   # Time in milliseconds that should pass without a request before the connection is closed
+  # Should be longer then the connection timeout to avoid closing an in progress request.
   connection_ttl: 10_000,
   # Extra connection options to pass to `:gun.open/3`
   connection_opts: %{}
 ]
 ```
+
 
 You can override the default profile or create a new one by creating an entry in your `config/*.exs` file
 
@@ -121,16 +125,16 @@ config :cables,
     default: [
       max_streams: 1000
     ],
-    slow_connection: [
-      connection_timeout: 10_000
+    unlimited_streams: [
+      max_streams: :infinity
     ]
   ]
 ```
 
-Then pass the profile into `Cables.new_pool/2`
+Then pass the profile into `Cables.new/2`
 
 ```elixir
-{:ok, slow_pool} = Cables.new_pool("https://myslowsite", :slow_connection)
+{:ok, unlimited_pool} = Cables.new("https://myslowsite", :unlimited_streams)
 ```
 
 ### HTTP Fallback
@@ -147,14 +151,26 @@ config :cables,
 
 ...
 
-{:ok, http_cable} = Cables.new_pool("https://httpbin.com/", :http)
+{:ok, http_cable} = Cables.new("https://httpbin.com/", :http)
+```
+
+### Named Supervised Pools
+
+You can add a Cables pool to your supervisor tree using `Cables.child_spec/3`
+
+```
+children = [
+  Cables.child_spec(:my_named_pool, "https://nghttp2.org/")
+]
+{:ok, _pid} = Supervisor.start_link(children, strategy: :one_for_one)
+{:ok, %Cables.Response{status: 200}} = Cables.get(:my_named_pool, "/httpbin/get")
 ```
 
 ## Benchmarks
 
 Cables client wasn't built out of a need for speed, but rather it was made from necessity to base new applications around low-level parallel long-lived HTTP/2 streams with few connections. That being said, the client that resulted has very good performance characteristics.
 
-Since any new HTTP client would be incomplete without a comparison. A hastely put together benchmark can be found at [CablesBenchmark](http://github.com/hansonkd/cables_benchmark). The basic conclusion is that Cables can be up to 10-30% faster than HTTPoison/hackney (HTTP/1.1)'s connection pools while maintaining a fraction of the connections. Even when Cables are limited to 1 stream per connection, they will in general outperform HTTPoison. When pushing 10,000 requests down 1 connection with 1 stream, Cables are about 2x faster than HTTPoison.
+Since any new HTTP client would be incomplete without a comparison. A hastely put together benchmark can be found at [CablesBenchmark](http://github.com/hansonkd/cables_benchmark). The basic conclusion is that Cables can be up to 10-30% faster than HTTPoison/hackney's (HTTP/1.1) connection pools while maintaining a fraction of the connections. Even when Cables are limited to 1 stream per connection, they will in general outperform HTTPoison. When pushing 10,000 requests down 1 connection with 1 stream, Cables are about 2x faster than HTTPoison.
 
 The benchmark is very naive and is done with the client on the same machine as the server. Over a network, I would expect HTTP/2 performance to continue to outpace HTTP/1.1, but that is an exercise for another day.
 
@@ -166,6 +182,8 @@ The pool is very naive. It is based around searching over a Map structure and in
 
 When there is a spurt of new requests (requests added faster than the time it takes to connect) when the current connections are past their threshold (or there are not current connections), Cables will open all available connections. This isn't ideal if you add 10 requests to the queue at once because it will open 10 new connections in anticipation of more requests later. We should add the option to limit the rate of new connections created.
 
+We should also handle errors in the `Cables.Handler` callbacks and close the connection if any step produces an error.
+
 ## Installation
 
 The package can be installed by adding `cables` to your list of dependencies in `mix.exs`:
@@ -173,7 +191,7 @@ The package can be installed by adding `cables` to your list of dependencies in 
 ```elixir
 def deps do
   [
-    {:cables, "~> 0.1.1"}
+    {:cables, "~> 0.2.0"}
   ]
 end
 ```

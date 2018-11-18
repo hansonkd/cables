@@ -2,17 +2,14 @@ defmodule Cables do
   @moduledoc """
   Asynchronous multiplexed HTTP/2 connection manager.
 
-  Create a new Cable using `Cable.new_pool/2`. Cables will not open a connection
-  until the first request is recieved.
+  Create a new Cable using `Cable.new/2`. Cables will immediately open `min_connections` specified in the profile.
 
   ## Examples
-      {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      {:ok, cable} = Cables.new("https://nghttp2.org/")
       {:ok, %Cables.Response{status: 200}} = Cables.get(cable, "/httpbin/get")
   """
 
   @type profile() :: [
-    pool_timeout: integer(),
-    connection_timeout: integer(),
     threshold: integer(),
     max_requests: integer(),
     max_streams: integer(),
@@ -20,6 +17,11 @@ defmodule Cables do
     min_connections: integer(),
     connnection_ttl: integer(),
     connection_opts: map()
+  ]
+  @type request_opts :: [
+    reply_to: pid(),
+    pool_timeout: integer(),
+    connection_timeout: integer(),
   ]
   @type http_method() :: :get | :post | :head | :put | :patch | :options | :delete | String.t
 
@@ -30,28 +32,32 @@ defmodule Cables do
     defstruct [:method, :path, :headers, :body, :reply_to]
   end
 
-  defmodule Cable do
-    @moduledoc """
-    Holds timeout info and poolname
-    """
-    defstruct [:pool_name, :pool_timeout, :connection_timeout]
+  @doc """
+  Create a new pool and attach it to the global Cables supervisor.
+  """
+  @spec new(String.t(), atom()) :: Cabel.t()
+  def new(uri, profile_name \\ :default) do
+    {:ok, pid} = DynamicSupervisor.start_child(
+      Cabels.ConnPoolSupervisor,
+      {Cables.Pool, pool_opts(uri, profile_name)}
+    )
+    {:ok, pid}
   end
 
   @doc """
-  If a pool is not already created for the specified uri, create one.
+  Create a named supervised pool to include in
+
+  ## Examples
+
+      iex> children = [ Cables.child_spec(:my_named_pool, "https://nghttp2.org/") ]
+      ...> {:ok, _pid} = Supervisor.start_link(children, strategy: :one_for_one)
+      ...> {:ok, %Cables.Response{status: status}} = Cables.post(:my_named_pool, "/httpbin/post", [], "hello world")
+      ...> status
+      200
   """
-  @spec new_pool(String.t(), atom()) :: Cabel.t()
-  def new_pool(uri, profile_name \\ :default) do
-    %URI{host: host, scheme: scheme, port: port} = URI.parse(uri)
-
-    profile = get_profile(profile_name)
-    conn_opts = conn_opts(scheme, profile)
-
-    {:ok, pid} = DynamicSupervisor.start_child(
-      Cabels.ConnPoolSupervisor,
-      {Cables.Pool, Keyword.merge(profile, [connection_opts: conn_opts, host: to_charlist(host), port: port])}
-    )
-    {:ok, make_cable(pid, profile)}
+  @spec child_spec(atom(), String.t(), atom()) :: {module(), any()}
+  def child_spec(name, uri, profile_name \\ :default) when is_atom(name) do
+    {Cables.Pool, [{:name, name} | pool_opts(uri, profile_name)]}
   end
 
   @doc """
@@ -62,13 +68,13 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      iex> {:ok, cable} = Cables.new("https://nghttp2.org/")
       ...> {:ok, %Cables.Response{status: status}} = Cables.request(cable, :get, "/httpbin/get", Cables.Response, nil)
       ...> status
       200
   """
-  @spec request(Cabel.t(), http_method(), String.t, [{String.t, String.t}], String.t, pid(), module(), any()) :: t::any()
-  def request(%Cable{pool_name: pool, pool_timeout: pool_timeout, connection_timeout: timeout}, method, path, headers \\ [], body \\ "", reply_to \\ nil, module, init_args) do
+  @spec request(pid() | atom(), http_method(), String.t, [{String.t, String.t}], String.t, request_opts(), module(), any()) :: t::any()
+  def request(pool, method, path, headers \\ [], body \\ "", opts \\ [], module, init_args) do
     method_str =
       case method do
         :get -> "GET"
@@ -86,14 +92,13 @@ defmodule Cables do
       path: path,
       headers: headers,
       body: body,
-      reply_to: if is_nil(reply_to) do self() else reply_to end
+      reply_to: Keyword.get(opts, :reply_to, self())
     }
 
-    {gun_pid, stream_ref} = Cables.Pool.request_stream(pool, request, pool_timeout)
-
+    {gun_pid, stream_ref} = Cables.Pool.request_stream(pool, request, Keyword.get(opts, :pool_timeout, 5_000))
 
     try do
-      module.handle(gun_pid, stream_ref, timeout, init_args)
+      module.handle(gun_pid, stream_ref, Keyword.get(opts, :connection_timeout, 5_000), init_args)
     after
       Cables.Pool.finish_stream(pool, gun_pid, stream_ref)
     end
@@ -104,15 +109,20 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      iex> {:ok, cable} = Cables.new("https://nghttp2.org/")
       ...> {:ok, %Cables.Response{status: status}} = Cables.get(cable, "/httpbin/get")
       ...> status
       200
 
+      iex> {:ok, cable} = Cables.new("https://nghttp2.org/")
+      ...> {:ok, %Cables.Response{status: status}} = Cables.get(cable, "/httpbin/delay/8", [{"my-custom-header", "some_header_value"}], connection_timeout: 10_000, pool_timeout: 10_000)
+      ...> status
+      200
+
   """
-  @spec get(Cabel.t(), [{String.t, String.t}], String.t, pid()) :: {:ok, Cables.Response.t} | {:error, any()}
-  def get(cable, path, headers \\ [], reply_to \\ nil) do
-    request(cable, :get, path, headers, "", reply_to, Cables.Response, nil)
+  @spec get(Cabel.t(), [{String.t, String.t}], String.t, request_opts()) :: {:ok, Cables.Response.t} | {:error, any()}
+  def get(cable, path, headers \\ [], opts \\ []) do
+    request(cable, :get, path, headers, "", opts, Cables.Response, nil)
   end
 
   @doc """
@@ -120,15 +130,15 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      iex> {:ok, cable} = Cables.new("https://nghttp2.org/")
       ...> {:ok, %Cables.Response{status: status}} = Cables.post(cable, "/httpbin/post", [], "hello world")
       ...> status
       200
 
   """
-  @spec post(Cabel.t(), String.t, [{String.t, String.t}], iodata(), pid()) :: {:ok, Cables.Response.t} | {:error, any()}
-  def post(cable, path, headers \\ [], body \\ "", reply_to \\ nil) do
-    request(cable, :post, path, headers, body, reply_to, Cables.Response, nil)
+  @spec post(Cabel.t(), String.t, [{String.t, String.t}], iodata(), request_opts()) :: {:ok, Cables.Response.t} | {:error, any()}
+  def post(cable, path, headers \\ [], body \\ "", opts \\ []) do
+    request(cable, :post, path, headers, body, opts, Cables.Response, nil)
   end
 
   @doc """
@@ -136,14 +146,14 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      iex> {:ok, cable} = Cables.new("https://nghttp2.org/")
       ...> {:ok, %Cables.Response{status: status}} = Cables.put(cable, "/httpbin/put", [], "hello world")
       ...> status
       200
   """
-  @spec put(Cabel.t(), String.t, [{String.t, String.t}], iodata(), pid()) :: {:ok, Cables.Response.t} | {:error, any()}
-  def put(cable, path, headers \\ [], body \\ "", reply_to \\ nil) do
-    request(cable, :put, path, headers, body, reply_to, Cables.Response, nil)
+  @spec put(Cabel.t(), String.t, [{String.t, String.t}], iodata(), request_opts()) :: {:ok, Cables.Response.t} | {:error, any()}
+  def put(cable, path, headers \\ [], body \\ "", opts \\ []) do
+    request(cable, :put, path, headers, body, opts, Cables.Response, nil)
   end
 
   @doc """
@@ -151,14 +161,14 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      iex> {:ok, cable} = Cables.new("https://nghttp2.org/")
       ...> {:ok, %Cables.Response{status: status}} = Cables.patch(cable, "/httpbin/patch", [], "hello world")
       ...> status
       200
   """
-  @spec patch(Cabel.t(), String.t, [{String.t, String.t}], iodata(), pid()) :: {:ok, Cables.Response.t} | {:error, any()}
-  def patch(cable, path, headers \\ [], body \\ "", reply_to \\ nil) do
-    request(cable, :patch, path, headers, body, reply_to, Cables.Response, nil)
+  @spec patch(Cabel.t(), String.t, [{String.t, String.t}], iodata(), request_opts()) :: {:ok, Cables.Response.t} | {:error, any()}
+  def patch(cable, path, headers \\ [], body \\ "", opts \\ []) do
+    request(cable, :patch, path, headers, body, opts, Cables.Response, nil)
   end
 
   @doc """
@@ -166,30 +176,30 @@ defmodule Cables do
 
   ## Examples
 
-      iex> {:ok, cable} = Cables.new_pool("https://nghttp2.org/")
+      iex> {:ok, cable} = Cables.new("https://nghttp2.org/")
       ...> {:ok, %Cables.Response{status: status}} = Cables.delete(cable, "/httpbin/delete")
       ...> status
       200
   """
-  @spec delete(Cabel.t(), String.t, [{String.t, String.t}], iodata(), pid()) :: {:ok, Cables.Response.t} | {:error, any()}
-  def delete(cable, path, headers \\ [], body \\ "", reply_to \\ nil) do
-    request(cable, :delete, path, headers, body, reply_to, Cables.Response, nil)
+  @spec delete(Cabel.t(), String.t, [{String.t, String.t}], iodata(), request_opts()) :: {:ok, Cables.Response.t} | {:error, any()}
+  def delete(cable, path, headers \\ [], body \\ "", opts \\ []) do
+    request(cable, :delete, path, headers, body, opts, Cables.Response, nil)
   end
 
   @doc """
   Simple HEAD request with `Cables.Response`
   """
-  @spec head(Cabel.t(), [{String.t, String.t}], String.t, pid()) :: {:ok, Cables.Response.t} | {:error, any()}
-  def head(cable, path, headers \\ [], reply_to \\ nil) do
-    request(cable, :head, path, headers, "", reply_to, Cables.Response, nil)
+  @spec head(Cabel.t(), [{String.t, String.t}], String.t, request_opts()) :: {:ok, Cables.Response.t} | {:error, any()}
+  def head(cable, path, headers \\ [], opts \\ []) do
+    request(cable, :head, path, headers, "", opts, Cables.Response, nil)
   end
 
   @doc """
   Simple OPTIONS request with `Cables.Response`
   """
-  @spec options(Cabel.t(), [{String.t, String.t}], String.t, pid()) :: {:ok, Cables.Response.t} | {:error, any()}
-  def options(cable, path, headers \\ [], reply_to \\ nil) do
-    request(cable, :options, path, headers, reply_to, Cables.Response, nil)
+  @spec options(Cabel.t(), [{String.t, String.t}], String.t, request_opts()) :: {:ok, Cables.Response.t} | {:error, any()}
+  def options(cable, path, headers \\ [], opts \\ []) do
+    request(cable, :options, path, headers, opts, Cables.Response, nil)
   end
 
   @doc """
@@ -218,13 +228,14 @@ defmodule Cables do
     Map.merge(%{transport: transport}, Keyword.get(profile, :connection_opts))
   end
 
-  @spec make_cable(atom(), profile()) :: Cable.t()
-  defp make_cable(pool_name, profile) do
-    %Cable{
-      pool_name: pool_name,
-      pool_timeout: Keyword.get(profile, :pool_timeout),
-      connection_timeout: Keyword.get(profile, :connection_timeout),
-    }
+  @spec pool_opts(String.t(), atom()) :: Cabel.t()
+  defp pool_opts(uri, profile_name) do
+    %URI{host: host, scheme: scheme, port: port} = URI.parse(uri)
+
+    profile = get_profile(profile_name)
+    conn_opts = conn_opts(scheme, profile)
+
+    Keyword.merge(profile, [connection_opts: conn_opts, host: to_charlist(host), port: port])
   end
 
   @spec get_profile(atom()) :: profile()

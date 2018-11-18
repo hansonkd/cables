@@ -31,7 +31,8 @@ defmodule Cables.Pool do
         GenServer.cast(pool, {:cancel_waiting, waiting_pid})
     end
     def start_link(opts) when is_list(opts) do
-        GenServer.start_link(__MODULE__, opts)
+        gen_server_opts = Keyword.take(opts, [:name])
+        GenServer.start_link(__MODULE__, opts, gen_server_opts)
     end
     def init(opts) do
         pool = %Pool{
@@ -69,11 +70,11 @@ defmodule Cables.Pool do
             waiting: waiting
             }) do
         case find_or_start_connection(Enum.count(requests), pool) do
-            {nil, new_pool} ->
-                {:noreply, %{new_pool | waiting: :queue.in({from, requests}, waiting)}}
-            {{gun_pid, conn}, new_pool} ->
+            {nil, new} ->
+                {:noreply, %{new | waiting: :queue.in({from, requests}, waiting)}}
+            {{gun_pid, conn}, new} ->
                 {stream_refs, new_conn} = do_requests(requests, gun_pid, conn)
-                {:reply, {gun_pid, stream_refs}, %{new_pool | connections: Map.put(connections, gun_pid, new_conn)}}
+                {:reply, {gun_pid, stream_refs}, %{new | connections: Map.put(connections, gun_pid, new_conn)}}
         end
     end
     def handle_cast(
@@ -86,7 +87,7 @@ defmodule Cables.Pool do
             max_requests: max_requests,
             max_streams: max_streams
             }) do
-        new_pool =
+        new =
             case connections do
                 %{^gun_pid => conn = %Connection{streams: streams}} ->
                     new_streams = Enum.reduce(stream_refs, streams, fn stream_ref, streams -> MapSet.delete(streams, stream_ref) end)
@@ -108,7 +109,7 @@ defmodule Cables.Pool do
                 _ ->
                     pool
             end
-        {:noreply, new_pool}
+        {:noreply, new}
     end
     def handle_cast({:cancel_waiting, waiting_pid}, pool = %Pool{waiting: waiting}) do
         {:noreply, %{pool | waiting: :queue.filter(fn {{pid, _ref}, _} -> pid == waiting_pid end, waiting)}}
@@ -164,7 +165,7 @@ defmodule Cables.Pool do
         end)
         case found do
             nil ->
-                new_pool =
+                new =
                     if Map.size(pending) + count_accepting(pool) < max_connections do
                         {:ok, gun_pid} = :gun.open(host, port, conn_opts)
                         ref = :erlang.monitor(:process, gun_pid)
@@ -180,7 +181,7 @@ defmodule Cables.Pool do
                             (lifetime + num_streams) <= max_requests
                         )
                 end)
-                {other, new_pool}
+                {other, new}
             other ->
                 {other, pool}
         end
