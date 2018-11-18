@@ -69,7 +69,7 @@ defmodule PlugProxy do
     |> Plug.Conn.send_chunked(status)
   end
 
-  def handle_data(chunk, {status, headers, pieces}) do
+  def handle_data(chunk, conn) do
     {:ok, conn} = Plug.Conn.chunk(conn, chunk)
     conn
   end
