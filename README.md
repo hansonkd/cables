@@ -39,6 +39,12 @@ After processing the headers, `handle_data/2` will loop until there is no more r
 
 After all response data is recieved, `handle_finish/1` will be called with the state from `handle_data/2` to finish any processing before passing it back.
 
+## Usage
+
+```elixir
+{:ok, cable} = Cables.new("https://nghttp2.org/")
+{:ok, Cables.Response{body: body, status: status headers: headers}} = Cables.get(cable, "/httpbin/get")
+```
 
 ## Example Plug Proxy
 
