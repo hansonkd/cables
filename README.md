@@ -43,7 +43,7 @@ After all response data is recieved, `handle_finish/1` will be called with the s
 
 ```elixir
 {:ok, cable} = Cables.new("https://nghttp2.org/")
-{:ok, Cables.Response{body: body, status: status headers: headers}} = Cables.get(cable, "/httpbin/get")
+{:ok, %Cables.Response{body: body, status: status headers: headers}} = Cables.get(cable, "/httpbin/get")
 ```
 
 ## Example Plug Proxy
