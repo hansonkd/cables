@@ -193,13 +193,17 @@ defmodule Cables.Pool do
         available_streams = max_streams - MapSet.size(streams)
         if available_streams > 0 do
             case :queue.out(waiting_queue) do
-                {{:value, {waiting, requests}}, new_queue} ->
-                    if Enum.count(requests) <= available_streams do
-                        {stream_refs, new_conn} = do_requests(requests, gun_pid, conn)
-                        GenServer.reply(waiting, {gun_pid, stream_refs})
-                        handle_waiting(gun_pid, new_conn, new_queue, max_streams)
+                {{:value, {{pid, _ref} = waiting, requests}}, new_queue} ->
+                    if not Process.alive?(pid) do
+                        handle_waiting(gun_pid, conn, new_queue, max_streams)
                     else
-                        {conn, waiting_queue}
+                        if Enum.count(requests) <= available_streams do
+                            {stream_refs, new_conn} = do_requests(requests, gun_pid, conn)
+                            GenServer.reply(waiting, {gun_pid, stream_refs})
+                            handle_waiting(gun_pid, new_conn, new_queue, max_streams)
+                        else
+                            {conn, waiting_queue}
+                        end
                     end
                 {:empty, _q} ->
                     {conn, waiting_queue}
