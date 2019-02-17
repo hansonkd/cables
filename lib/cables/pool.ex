@@ -36,7 +36,7 @@ defmodule Cables.Pool do
     end
     def init(opts) do
         pool = %Pool{
-            connections: %{},
+            connections: [],
             waiting: :queue.new(),
             pending: %{},
             host: Keyword.fetch!(opts, :host),
@@ -74,7 +74,7 @@ defmodule Cables.Pool do
                 {:noreply, %{new | waiting: :queue.in({from, requests}, waiting)}}
             {{gun_pid, conn}, new} ->
                 {stream_refs, new_conn} = do_requests(requests, gun_pid, conn)
-                {:reply, {gun_pid, stream_refs}, %{new | connections: Map.put(connections, gun_pid, new_conn)}}
+                {:reply, {gun_pid, stream_refs}, %{new | connections: :orddict.store(gun_pid, new_conn, connections)}}
         end
     end
     def handle_cast(
@@ -88,25 +88,25 @@ defmodule Cables.Pool do
             max_streams: max_streams
             }) do
         new =
-            case connections do
-                %{^gun_pid => conn = %Connection{streams: streams}} ->
+            case :orddict.find(gun_pid, connections) do
+                {:ok, conn = %Connection{streams: streams}} ->
                     new_streams = Enum.reduce(stream_refs, streams, fn stream_ref, streams -> MapSet.delete(streams, stream_ref) end)
                     {new_connection, new_waiting} =
                         handle_waiting(gun_pid, %{conn | streams: new_streams}, waiting, max_streams)
                     num_streams = MapSet.size(new_connection.streams)
                     new_connections =
                         cond do
-                            num_streams == 0 and Map.size(connections) > min_connections ->
+                            num_streams == 0 and length(connections) > min_connections ->
                                 timer = Process.send_after(self(), {:close, gun_pid}, ttl)
-                                Map.put(connections, gun_pid, %{new_connection | timer: timer})
+                                :orddict.store(gun_pid, %{new_connection | timer: timer}, connections)
                             num_streams == 0 and new_connection.lifetime >= max_requests ->
                                 send(self(), {:close, gun_pid})
-                                Map.delete(connections, gun_pid)
+                                :orddict.erase(gun_pid, connections)
                             true ->
-                                Map.put(connections, gun_pid, new_connection)
+                                :orddict.store(gun_pid, new_connection, connections)
                         end
                     %{pool | connections: new_connections, waiting: new_waiting}
-                _ ->
+                :error ->
                     pool
             end
         {:noreply, new}
@@ -122,26 +122,30 @@ defmodule Cables.Pool do
             waiting: waiting,
             max_streams: max_streams}) do
         {ref, new_pending} = Map.pop(pending, gun_pid)
-        connection = Map.get_lazy(connections, gun_pid, fn -> Connection.new(ref) end)
+        connection = case :orddict.find(gun_pid, connections) do
+            {:ok, connection} -> connection
+            :error -> Connection.new(ref)
+        end
         {new_connection, new_waiting} = handle_waiting(gun_pid, connection, waiting, max_streams)
-        {:noreply, %{pool | pending: new_pending, waiting: new_waiting, connections: Map.put(connections, gun_pid, new_connection)}}
+        {:noreply, %{pool | pending: new_pending, waiting: new_waiting, connections: :orddict.store(gun_pid, new_connection, connections)}}
     end
     def handle_info({:gun_down, gun_pid, _protocol, _reason, _killed_streams, _unprocessed_streams}, pool = %Pool{connections: connections}) do
-        {:noreply, %{pool | connections: Map.delete(connections, gun_pid)}}
+        {:noreply, %{pool | connections: :orddict.erase(gun_pid, connections)}}
     end
-    def handle_info(
-        {:DOWN, _gun_ref, :process, gun_pid, _reason},
-        pool = %Pool{
-            pending: pending,
-            connections: connections}) do
-        {:noreply,
-          %{pool |
-            pending: Map.delete(pending, gun_pid),
-            connections: Map.delete(connections, gun_pid)}}
+    def handle_info({:DOWN, _gun_ref, :process, gun_pid, _reason}, pool) do
+        {:noreply, handle_down(pool, gun_pid)}
+    end
+    def handle_info({gun_pid, :badarg}, pool) do
+        {:noreply, handle_down(pool, gun_pid)}
     end
     def handle_info({:close, gun_pid}, pool = %Pool{connections: connections}) do
         :gun.close(gun_pid)
-        {:noreply, %{pool | connections: Map.delete(connections, gun_pid)}}
+        {:noreply, %{pool | connections: :orddict.erase(gun_pid, connections)}}
+    end
+    defp handle_down(pool = %Pool{pending: pending, connections: connections}, gun_pid) do
+        %{pool |
+            pending: Map.delete(pending, gun_pid),
+            connections: :orddict.erase(gun_pid, connections)}
     end
     defp find_or_start_connection(
         num_streams,

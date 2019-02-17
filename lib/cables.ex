@@ -95,19 +95,13 @@ defmodule Cables do
       reply_to: Keyword.get(opts, :reply_to, self())
     }
 
-    result =
-      try do
-        Cables.Pool.request_stream(pool, request, Keyword.get(opts, :pool_timeout, 5_000))
-      catch
-        :exit, reason ->
-          Cables.Pool.cancel_waiting(pool, self())
-          {:error, reason}
-      end
-
-    case result do
-      {:error, reason} ->
+    try do
+      Cables.Pool.request_stream(pool, request, Keyword.get(opts, :pool_timeout, 5_000))
+    catch
+      :exit, reason ->
+        Cables.Pool.cancel_waiting(pool, self())
         {:error, reason}
-
+    else
       {gun_pid, stream_ref} ->
         try do
           module.handle(
